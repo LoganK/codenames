@@ -16,7 +16,7 @@ type templateParameters struct {
 	GoogleAnalyticsID   string
 }
 
-func (s *Server) handleIndex(rw http.ResponseWriter, req *http.Request) {
+func (s *server) handleIndex(rw http.ResponseWriter, req *http.Request) {
 	dir, id := filepath.Split(req.URL.Path)
 	if dir != "" && dir != "/" {
 		http.NotFound(rw, req)

@@ -15,19 +15,91 @@ import (
 	"github.com/jbowens/dictionary"
 )
 
-type Server struct {
-	Server http.Server
-	tpl    *template.Template
+type Server interface {
+	NewServeMux(staticDir string) *http.ServeMux
+	Shutdown()
+}
+
+type server struct {
+	tpl *template.Template
 
 	gameIDWords []string
 
 	mu           sync.Mutex
 	games        map[string]*Game
 	defaultWords []string
-	mux          *http.ServeMux
+	cleanupDone  chan struct{}
 }
 
-func (s *Server) getGame(gameID, stateID string) (*Game, bool) {
+func NewServer(gameIdFile, wordFile string) (Server, error) {
+	gameIDs, err := dictionary.Load(gameIdFile)
+	if err != nil {
+		return nil, fmt.Errorf("load gameIds %s: %v", gameIdFile, err)
+	}
+	gameIDs = dictionary.Filter(gameIDs, func(s string) bool { return len(s) > 3 })
+	gameIDWords := gameIDs.Words()
+
+	d, err := dictionary.Load(wordFile)
+	if err != nil {
+		return nil, fmt.Errorf("load words %s: %v", wordFile, err)
+	}
+	defaultWords := d.Words()
+	sort.Strings(defaultWords)
+
+	tpl, err := template.ParseFiles(
+		filepath.Join("frontend", "index.html.tmpl"),
+		filepath.Join("frontend", "analytics.html.tmpl"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("parsing templates: %v", err)
+	}
+
+	ticker := time.NewTicker(10 * time.Minute)
+	cleanupDone := make(chan struct{})
+
+	s := &server{
+		tpl,
+		gameIDWords,
+		sync.Mutex{},
+		make(map[string]*Game),
+		defaultWords,
+		cleanupDone,
+	}
+
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupDone:
+				return
+			case <-ticker.C:
+				s.cleanupOldGames()
+			}
+		}
+	}()
+
+	return s, nil
+}
+
+func (s *server) NewServeMux(staticDir string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stats", s.handleStats)
+	mux.HandleFunc("/next-game", s.handleNextGame)
+	mux.HandleFunc("/end-turn", s.handleEndTurn)
+	mux.HandleFunc("/guess", s.handleGuess)
+	mux.HandleFunc("/game/", s.handleRetrieveGame)
+	mux.HandleFunc("/game-state", s.handleGameState)
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+	mux.HandleFunc("/", s.handleIndex)
+
+	return mux
+}
+
+func (s *server) Shutdown() {
+	s.cleanupDone <- struct{}{}
+}
+
+func (s *server) getGame(gameID, stateID string) (*Game, bool) {
 	g, ok := s.games[gameID]
 	if ok {
 		return g, ok
@@ -43,7 +115,7 @@ func (s *Server) getGame(gameID, stateID string) (*Game, bool) {
 
 // GET /game/<id>
 // (deprecated: use POST /game-state instead)
-func (s *Server) handleRetrieveGame(rw http.ResponseWriter, req *http.Request) {
+func (s *server) handleRetrieveGame(rw http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -66,7 +138,7 @@ func (s *Server) handleRetrieveGame(rw http.ResponseWriter, req *http.Request) {
 }
 
 // POST /game-state
-func (s *Server) handleGameState(rw http.ResponseWriter, req *http.Request) {
+func (s *server) handleGameState(rw http.ResponseWriter, req *http.Request) {
 	var body struct {
 		GameID  string `json:"game_id"`
 		StateID string `json:"state_id"`
@@ -90,7 +162,7 @@ func (s *Server) handleGameState(rw http.ResponseWriter, req *http.Request) {
 }
 
 // POST /guess
-func (s *Server) handleGuess(rw http.ResponseWriter, req *http.Request) {
+func (s *server) handleGuess(rw http.ResponseWriter, req *http.Request) {
 	var request struct {
 		GameID  string `json:"game_id"`
 		StateID string `json:"state_id"`
@@ -120,7 +192,7 @@ func (s *Server) handleGuess(rw http.ResponseWriter, req *http.Request) {
 }
 
 // POST /end-turn
-func (s *Server) handleEndTurn(rw http.ResponseWriter, req *http.Request) {
+func (s *server) handleEndTurn(rw http.ResponseWriter, req *http.Request) {
 	var request struct {
 		GameID  string `json:"game_id"`
 		StateID string `json:"state_id"`
@@ -148,7 +220,7 @@ func (s *Server) handleEndTurn(rw http.ResponseWriter, req *http.Request) {
 	writeGame(rw, g)
 }
 
-func (s *Server) handleNextGame(rw http.ResponseWriter, req *http.Request) {
+func (s *server) handleNextGame(rw http.ResponseWriter, req *http.Request) {
 	var request struct {
 		GameID  string   `json:"game_id"`
 		WordSet []string `json:"word_set"`
@@ -188,7 +260,7 @@ type statsResponse struct {
 	InProgress int `json:"games_in_progress"`
 }
 
-func (s *Server) handleStats(rw http.ResponseWriter, req *http.Request) {
+func (s *server) handleStats(rw http.ResponseWriter, req *http.Request) {
 	var inProgress int
 
 	s.mu.Lock()
@@ -202,7 +274,7 @@ func (s *Server) handleStats(rw http.ResponseWriter, req *http.Request) {
 	writeJSON(rw, statsResponse{inProgress})
 }
 
-func (s *Server) cleanupOldGames() {
+func (s *server) cleanupOldGames() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, g := range s.games {
@@ -217,48 +289,6 @@ func (s *Server) cleanupOldGames() {
 			continue
 		}
 	}
-}
-
-func (s *Server) Start() error {
-	gameIDs, err := dictionary.Load("assets/game-id-words.txt")
-	if err != nil {
-		return err
-	}
-	d, err := dictionary.Load("assets/original.txt")
-	if err != nil {
-		return err
-	}
-	s.tpl, err = template.ParseFiles(
-		filepath.Join("frontend", "index.html.tmpl"),
-		filepath.Join("frontend", "analytics.html.tmpl"),
-	)
-
-	s.mux = http.NewServeMux()
-	s.mux.HandleFunc("/stats", s.handleStats)
-	s.mux.HandleFunc("/next-game", s.handleNextGame)
-	s.mux.HandleFunc("/end-turn", s.handleEndTurn)
-	s.mux.HandleFunc("/guess", s.handleGuess)
-	s.mux.HandleFunc("/game/", s.handleRetrieveGame)
-	s.mux.HandleFunc("/game-state", s.handleGameState)
-	s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("frontend/dist"))))
-	s.mux.HandleFunc("/", s.handleIndex)
-
-	gameIDs = dictionary.Filter(gameIDs, func(s string) bool { return len(s) > 3 })
-	s.gameIDWords = gameIDs.Words()
-
-	s.games = make(map[string]*Game)
-	s.defaultWords = d.Words()
-	sort.Strings(s.defaultWords)
-	s.Server.Handler = s.mux
-
-	go func() {
-		for range time.Tick(10 * time.Minute) {
-			s.cleanupOldGames()
-		}
-	}()
-
-	fmt.Println("Started server. Available on http://localhost:9091")
-	return s.Server.ListenAndServe()
 }
 
 func writeGame(rw http.ResponseWriter, g *Game) {

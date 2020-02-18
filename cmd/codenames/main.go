@@ -2,7 +2,7 @@ package main
 
 import (
         "flag"
-	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -11,17 +11,28 @@ import (
 	"github.com/jbowens/codenames"
 )
 
+var staticDir = flag.String("static_dir", "frontend/dist", "Directory containing the static assets for serving.")
+
 func main() {
         flag.Parse()
 
 	rand.Seed(time.Now().UnixNano())
 
-	server := &codenames.Server{
-		Server: http.Server{
-			Addr: ":9091",
-		},
+	s := &http.Server{
+		Addr: ":9091",
 	}
-	if err := server.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+
+	codenames, err := codenames.NewServer("assets/game-id-words.txt", "assets/original.txt")
+	if err != nil {
+		log.Fatal(err)
 	}
+	s.Handler = codenames.NewServeMux(*staticDir)
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "localhost"
+	}
+	log.Printf("Starting server. Available on http://%s:%s", hostname, s.Addr)
+	log.Print(s.ListenAndServe())
+	codenames.Shutdown()
 }
