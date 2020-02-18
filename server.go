@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -227,10 +228,10 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	s.tpl, err = template.New("index").Parse(tpl)
-	if err != nil {
-		return err
-	}
+	s.tpl, err = template.ParseFiles(
+		filepath.Join("frontend", "index.html.tmpl"),
+		filepath.Join("frontend", "analytics.html.tmpl"),
+	)
 
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/stats", s.handleStats)

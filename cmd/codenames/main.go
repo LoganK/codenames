@@ -1,6 +1,7 @@
 package main
 
 import (
+        "flag"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 )
 
 func main() {
+        flag.Parse()
+
 	rand.Seed(time.Now().UnixNano())
 
 	server := &codenames.Server{
