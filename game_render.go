@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	_ "image/png"
 	"io/ioutil"
@@ -94,6 +95,13 @@ var imgCache = struct {
 	forFile: make(map[string]image.Image),
 }
 
+type Viewer int
+
+const (
+	Spymaster Viewer = iota
+	Player
+)
+
 func loadImage(filename string) (image.Image, error) {
 	// Allows for double-initialization, but there's no harm there.
 	img, ok := imgCache.forFile[filename]
@@ -141,7 +149,7 @@ func newFontContext() (*freetype.Context, error) {
 	return ctx, nil
 }
 
-func (g *Game) RenderGameBoard() (image.Image, error) {
+func (g *Game) RenderGameBoard(viewer Viewer) (image.Image, error) {
 	imgBoard := image.NewRGBA(image.Rect(0, 0, 1000, 665))
 
 	field, err := loadImage(*fieldImage)
@@ -149,10 +157,13 @@ func (g *Game) RenderGameBoard() (image.Image, error) {
 		log.Printf("failed to open image: %v", err)
 		field = image.White
 	}
+	if viewer == Spymaster {
+		field = image.White
+	}
 	draw.Draw(imgBoard, field.Bounds(), field, image.ZP, draw.Over)
 
 	for i, revealed := range g.Revealed {
-		if !revealed {
+		if viewer != Spymaster && !revealed {
 			continue
 		}
 
@@ -173,8 +184,16 @@ func (g *Game) RenderGameBoard() (image.Image, error) {
 			cardImg = image.NewGray(image.Rect(0, 0, 200, 133))
 		}
 
+		mask := image.Opaque
+
+		if viewer == Spymaster {
+			if revealed {
+				mask = image.NewUniform(color.Alpha16{0x3000})
+			}
+		}
+
 		cardRect := cardImg.Bounds().Add(cardPoints[i])
-		draw.Draw(imgBoard, cardRect, cardImg, image.ZP, draw.Over)
+		draw.DrawMask(imgBoard, cardRect, cardImg, image.ZP, mask, image.ZP, draw.Over)
 	}
 
 	// Note: Non-traditional rendering. Render the text _over_ the card so you can see the "covered" word.
@@ -187,26 +206,32 @@ func (g *Game) RenderGameBoard() (image.Image, error) {
 	yFixed := fixed.Int26_6(int32(fixed.I(fontRect.Dy()))/2 +
 		int32(fontCtx.PointToFixed(fontSizePoints))/2)
 
+	margin := 5
+
 	for i, word := range g.Words {
 		imgWord := image.NewRGBA(fontRect)
-		draw.Draw(imgWord, imgWord.Bounds(), image.Transparent, image.ZP, draw.Src)
+		background := image.NewUniform(color.Alpha16{0x7000})
+		if viewer == Spymaster {
+			background = image.NewUniform(color.Alpha16{0xa000})
+		}
+		draw.Draw(imgWord, imgWord.Bounds(), background, image.ZP, draw.Src)
 		fontCtx.SetDst(imgWord)
 
 		// Draw and calculate horizontal center
 		leftPt := fixed.Point26_6{
-			X: 0,
+			X: fixed.I(margin),
 			Y: yFixed,
 		}
 		rightPt, err := fontCtx.DrawString(word, leftPt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render word: %v", err)
 		}
-		widthFixed := rightPt.Sub(leftPt).X
+		widthPixels := rightPt.Sub(leftPt).X.Ceil() + 2 * margin
 
 		// TODO: Shrink the font size until the word fits (i.e., offset is negative).
-		xOffset := (fontRect.Dx() - widthFixed.Ceil()) / 2
-
+		xOffset := (fontRect.Dx() - widthPixels + 1) / 2
 		wordRect := fontRect.Add(fieldWordPoints[i]).Add(image.Point{xOffset, 0})
+		wordRect.Max.X -= fontRect.Dx() - widthPixels  // Clip to word width
 
 		draw.Draw(imgBoard, wordRect, imgWord, image.ZP, draw.Over)
 	}
