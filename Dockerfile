@@ -1,4 +1,4 @@
-FROM golang:1.12-stretch as builder
+FROM golang:1.13-buster as builder
 
 # Install npm and parcel
 RUN curl -sL https://deb.nodesource.com/setup_12.x | bash - && \
